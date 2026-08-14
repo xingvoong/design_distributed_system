@@ -1,0 +1,21 @@
+Machine Learning Systems: Architecture and Trade-offs
+
+Modern machine learning systems are not just models — they are complex distributed systems that must handle data ingestion, training, serving, and monitoring at scale. Understanding the architecture of these systems is as important as understanding the models themselves.
+
+A production ML system has three major phases: data processing, model training, and model serving. Each phase has different resource requirements and different failure modes. Data processing is typically IO-bound and embarrassingly parallel. Training is compute-bound and requires tight coordination between accelerators. Serving is latency-sensitive and must handle bursty traffic without degrading response times.
+
+Feature stores emerged as a critical piece of ML infrastructure. A feature store solves a specific problem: the same features computed offline for training need to be computed online for serving, and they need to be identical. Without a feature store, training and serving skew causes models to perform worse in production than in evaluation. Feature stores provide a unified API so that the same feature transformation code runs in both contexts.
+
+Vector databases have become essential for retrieval-augmented generation and semantic search. Unlike traditional databases optimized for exact lookups, vector databases index high-dimensional embedding vectors and support approximate nearest neighbor queries. The approximation is intentional — exact nearest neighbor search in high dimensions is computationally intractable, but approximate results are good enough for most applications.
+
+Embedding models convert text, images, and other data into dense numerical vectors that capture semantic meaning. Two pieces of text with similar meaning will have embedding vectors that are close in the vector space, even if they share no exact words. This property enables semantic search: given a query, compute its embedding and find database entries with nearby embeddings.
+
+The choice of embedding model matters. Larger models generally produce better embeddings but are slower and more expensive. Some models are trained on general text while others are fine-tuned for specific domains like legal documents or medical records. The embedding dimension affects storage requirements and query latency — a 1536-dimensional vector requires 6KB of storage per document chunk.
+
+Batch versus streaming is a fundamental architectural decision in ML systems. Batch systems process data in large chunks on a schedule — nightly retraining, hourly feature updates. Streaming systems process data event by event as it arrives. Batch systems are simpler to build and easier to reason about, but they introduce latency. Streaming systems are complex but enable real-time personalization and fraud detection.
+
+Model monitoring is often neglected until something goes wrong. Models degrade over time as the distribution of real-world data shifts away from the training distribution. This is called data drift. The model's accuracy metrics may look fine on historical data while performance degrades on current data. Monitoring systems must track both the statistical properties of inputs and the downstream business metrics that the model is meant to optimize.
+
+Canary deployments are the standard way to roll out new models. The new model handles a small percentage of traffic while the old model handles the rest. If business metrics are stable or improving for the canary, traffic is gradually shifted until the new model handles everything. If metrics degrade, traffic is shifted back immediately. This requires the ability to route requests to different model versions and to measure metrics per cohort.
+
+Shadow mode testing goes further than canary deployments. In shadow mode, both the old and new models score every request, but only the old model's output is returned to users. The new model's outputs are logged and compared offline. This lets you evaluate a new model on real traffic without exposing users to potentially degraded results. It is especially useful for models where mistakes are costly.

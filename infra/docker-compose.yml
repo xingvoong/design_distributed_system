@@ -1,0 +1,76 @@
+x-build: &build
+  build:
+    context: ..
+    dockerfile: Dockerfile
+
+x-redis-env: &redis-env
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  QUEUE_NAME: document-jobs
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ai-inference:
+    <<: *build
+    working_dir: /app/services/ai-inference
+    command: node dist/index.js
+    ports:
+      - "3003:3003"
+    environment:
+      PORT: "3003"
+    # No real API key — primary will fail, circuit opens, fallback (stub) takes over
+
+  pipeline-coordinator:
+    <<: *build
+    working_dir: /app/services/pipeline-coordinator
+    command: node dist/index.js
+    ports:
+      - "3002:3002"
+    environment:
+      <<: *redis-env
+      NODE_ID: coordinator-1
+      HEALTH_PORT: "3002"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *build
+    working_dir: /app/services/worker
+    command: node dist/index.js
+    volumes:
+      - ../data:/data:ro
+    ports:
+      - "3001:3001"
+    environment:
+      <<: *redis-env
+      HEALTH_PORT: "3001"
+      INFERENCE_URL: http://ai-inference:3003
+    depends_on:
+      redis:
+        condition: service_healthy
+      ai-inference:
+        condition: service_started
+
+  seeder:
+    <<: *build
+    # Run from packages/queue where bullmq is a direct dependency
+    working_dir: /app/packages/queue
+    command: node /app/packages/queue/seed.mjs
+    volumes:
+      - ../data:/data:ro
+    environment:
+      <<: *redis-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
