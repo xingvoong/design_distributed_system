@@ -1,5 +1,6 @@
 import { createLeaderElection } from '@docflow/leader-election'
 import { createProducer } from '@docflow/queue'
+import type { DocumentJob } from '@docflow/types'
 import Fastify from 'fastify'
 import { Scheduler } from './scheduler.js'
 
@@ -14,20 +15,30 @@ const HEALTH_PORT = Number(process.env['HEALTH_PORT'] ?? 3002)
 const QUEUE_NAME = process.env['QUEUE_NAME'] ?? 'document-jobs'
 
 async function main() {
-  // Health server
+  // Producer and scheduler created before the HTTP server so the
+  // /internal/register route can reference scheduler at call time.
+  const producer = createProducer<DocumentJob>({ ...redisConfig, queueName: QUEUE_NAME })
+  const scheduler = new Scheduler(producer)
+
+  // Health + registration server
   const app = Fastify({ logger: false })
   app.get('/healthz', async () => ({ status: 'ok', nodeId: NODE_ID }))
   app.get('/readyz', async () => ({ status: 'ok', nodeId: NODE_ID }))
+
+  // Called by the ingest service to register a document for processing.
+  // Any coordinator replica accepts registrations — the leader's scheduler
+  // picks them up on the next poll tick.
+  app.post<{ Body: Omit<DocumentJob, 'source'> & { source: string } }>(
+    '/internal/register',
+    async (req, reply) => {
+      scheduler.enqueue(req.body)
+      console.log({ documentId: req.body.documentId, tenantId: req.body.tenantId }, 'document registered')
+      return reply.code(202).send({ queued: true })
+    },
+  )
+
   await app.listen({ port: HEALTH_PORT, host: '0.0.0.0' })
   console.log({ port: HEALTH_PORT }, 'health server listening')
-
-  // Producer — coordinator writes jobs, workers consume them
-  const producer = createProducer<import('@docflow/types').DocumentJob>({
-    ...redisConfig,
-    queueName: QUEUE_NAME,
-  })
-
-  const scheduler = new Scheduler(producer)
 
   // Leader election — only the leader runs the scheduler
   const election = createLeaderElection({

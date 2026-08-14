@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import type { StorageAmbassador } from '@docflow/storage-ambassador'
 import type { DocumentChunk, DocumentJob } from '@docflow/types'
 import { chunkText } from './chunker.js'
 
@@ -9,10 +9,14 @@ export interface ProcessResult {
   processingMs: number
 }
 
-export async function processDocument(job: DocumentJob): Promise<ProcessResult> {
+export async function processDocument(
+  job: DocumentJob,
+  storage: StorageAmbassador,
+): Promise<ProcessResult> {
   const start = Date.now()
 
-  const raw = await readFile(job.source, 'utf-8')
+  const buf = await storage.get(job.source)
+  const raw = buf.toString('utf-8')
   const text = extractText(raw, job.mimeType)
   const chunks = chunkText(text, job.documentId, job.tenantId)
 

@@ -1,5 +1,5 @@
 {
-  "name": "@docflow/worker",
+  "name": "@docflow/ingest-service",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -8,20 +8,16 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "node --watch dist/index.js",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@docflow/db": "workspace:*",
-    "@docflow/queue": "workspace:*",
     "@docflow/storage-ambassador": "workspace:*",
     "@docflow/types": "workspace:*",
+    "@fastify/multipart": "^8.0.0",
     "fastify": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
-    "typescript": "^5.5.0",
-    "vitest": "^2.0.0"
+    "typescript": "^5.5.0"
   }
 }

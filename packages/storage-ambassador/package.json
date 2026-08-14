@@ -1,23 +1,15 @@
 {
-  "name": "@docflow/worker",
+  "name": "@docflow/storage-ambassador",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "node --watch dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@docflow/db": "workspace:*",
-    "@docflow/queue": "workspace:*",
-    "@docflow/storage-ambassador": "workspace:*",
-    "@docflow/types": "workspace:*",
-    "fastify": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

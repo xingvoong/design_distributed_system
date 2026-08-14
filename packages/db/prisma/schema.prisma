@@ -1,0 +1,26 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One chunk of a document with its embedding vector.
+/// The embedding column uses pgvector — Prisma marks it Unsupported
+/// so inserts go through $executeRaw.
+model EmbeddedChunk {
+  id             String   @id @default(cuid())
+  documentId     String
+  tenantId       String
+  chunkIndex     Int
+  text           String
+  tokenCount     Int
+  embedding      Unsupported("vector(1536)")
+  embeddingModel String
+  createdAt      DateTime @default(now())
+
+  @@index([documentId])
+  @@index([tenantId])
+}

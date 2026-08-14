@@ -8,6 +8,9 @@ x-redis-env: &redis-env
   REDIS_PORT: "6379"
   QUEUE_NAME: document-jobs
 
+x-db-env: &db-env
+  DATABASE_URL: postgresql://docflow:docflow@postgres:5432/docflow
+
 services:
   redis:
     image: redis:7-alpine
@@ -18,6 +21,31 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: docflow
+      POSTGRES_PASSWORD: docflow
+      POSTGRES_DB: docflow
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *build
+    working_dir: /app/packages/db
+    command: npx prisma migrate deploy
+    environment:
+      <<: *db-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   ai-inference:
     <<: *build
@@ -43,23 +71,44 @@ services:
       redis:
         condition: service_healthy
 
+  ingest-service:
+    <<: *build
+    working_dir: /app/services/ingest-service
+    command: node dist/index.js
+    ports:
+      - "3004:3004"
+    volumes:
+      - uploads:/uploads
+    environment:
+      PORT: "3004"
+      COORDINATOR_URL: http://pipeline-coordinator:3002
+      STORAGE_BASE: /uploads
+    depends_on:
+      pipeline-coordinator:
+        condition: service_started
+
   worker:
     <<: *build
     working_dir: /app/services/worker
     command: node dist/index.js
     volumes:
       - ../data:/data:ro
+      - uploads:/uploads
     ports:
       - "3001:3001"
     environment:
       <<: *redis-env
+      <<: *db-env
       HEALTH_PORT: "3001"
       INFERENCE_URL: http://ai-inference:3003
+      STORAGE_BASE: /uploads
     depends_on:
       redis:
         condition: service_healthy
       ai-inference:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
   seeder:
     <<: *build
@@ -74,3 +123,6 @@ services:
       redis:
         condition: service_healthy
     restart: "no"
+
+volumes:
+  uploads:

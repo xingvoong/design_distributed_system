@@ -14,6 +14,7 @@ import { writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createProducer, createConsumer } from '@docflow/queue'
+import { createLocalAmbassador } from '@docflow/storage-ambassador'
 import type { DocumentJob } from '@docflow/types'
 import { processDocument } from '../processor.js'
 import { createInferenceClient } from '../inference-client.js'
@@ -82,7 +83,7 @@ describe('processDocument + inference client', () => {
       sizeBytes: 5000,
     }
 
-    const result = await processDocument(job)
+    const result = await processDocument(job, createLocalAmbassador('/'))
     expect(result.documentId).toBe('doc-test')
     expect(result.chunks.length).toBeGreaterThan(0)
     expect(result.chunks[0]?.text.length).toBeGreaterThan(0)
@@ -98,7 +99,7 @@ describe('processDocument + inference client', () => {
       sizeBytes: 5000,
     }
 
-    const result = await processDocument(job)
+    const result = await processDocument(job, createLocalAmbassador('/'))
     const client = createInferenceClient(inferenceUrl)
     const embeddings = await client.embed(result.chunks, job.tenantId, 'job-1')
 
@@ -115,7 +116,7 @@ describe('processDocument + inference client', () => {
       sizeBytes: 5000,
     }
 
-    const result = await processDocument(job)
+    const result = await processDocument(job, createLocalAmbassador('/'))
     const client = createInferenceClient(inferenceUrl)
     const embeddings = await client.embed(result.chunks, job.tenantId, 'job-e2e')
 
@@ -164,7 +165,7 @@ describe('queue → worker → inference (end-to-end)', () => {
     const consumer = createConsumer<DocumentJob>(
       REDIS,
       async (job, jobId) => {
-        const result = await processDocument(job)
+        const result = await processDocument(job, createLocalAmbassador('/'))
         const client = createInferenceClient(inferenceUrl)
         const embeddings = await client.embed(result.chunks, job.tenantId, jobId)
         resolve({ chunks: result.chunks.length, embeddings: embeddings.length })
