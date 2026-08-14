@@ -1,0 +1,23 @@
+{
+  "name": "@docflow/pipeline-coordinator",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "node --watch dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@docflow/leader-election": "workspace:*",
+    "@docflow/queue": "workspace:*",
+    "@docflow/types": "workspace:*",
+    "fastify": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -5,9 +5,10 @@ export interface QueueConfig {
   queueName: string
 }
 
-export interface JobPayload {
-  [key: string]: unknown
-}
+// Marker constraint — any serializable object qualifies.
+// Avoids forcing callers to add an index signature to their domain types.
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface JobPayload {}
 
 export interface JobOptions {
   priority?: number

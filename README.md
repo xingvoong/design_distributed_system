@@ -151,7 +151,7 @@ CI              GitHub Actions
 Each phase ships something runnable.
 
 1. **Queue + leader election** — core primitives ✓
-2. **Worker + pipeline coordinator** — batch layer functional end-to-end
+2. **Worker + pipeline coordinator** — batch layer functional end-to-end ✓
 3. **AI inference + adapter** — embeddings flowing, provider switching works
 4. **Ingest service + storage ambassador** — full ingestion path live
 5. **Query service** — scatter/gather search across shards
@@ -212,3 +212,49 @@ Phase 2 builds two things on top:
 - **Pipeline Coordinator** — calls `createLeaderElection()`, ensures only one node schedules jobs at a time
 
 Nothing in phase 1 changes from here forward.
+
+---
+
+## Phase 2 — Worker + Pipeline Coordinator
+
+### `@docflow/worker`
+
+Pulls document jobs from the queue, extracts text, splits it into chunks, and hands the result to phase 3 for embedding.
+
+- `processDocument()` reads the file and routes it through `extractText()` based on MIME type. PDF binary parsing is a phase 3 concern — for now the pipeline stays runnable end-to-end.
+- `chunkText()` splits on sentence boundaries to avoid cutting mid-thought. Each chunk overlaps with the previous by 64 tokens — this preserves context at chunk edges when doing retrieval.
+- `stop()` signals the consumer to drain in-flight jobs before the process exits. Kubernetes sends `SIGTERM` before killing the pod — this gives workers time to finish without dropping work.
+- `/healthz` and `/readyz` are separate endpoints. Liveness tells Kubernetes the process is alive. Readiness tells it whether to send traffic. The worker marks itself not-ready during shutdown so the load balancer stops routing jobs to it.
+
+**Files:**
+```
+services/worker/src/
+├── chunker.ts     ← splits text into overlapping chunks, sentence-aware
+├── processor.ts   ← reads file, extracts text, calls chunker
+├── health.ts      ← /healthz and /readyz for Kubernetes probes
+└── index.ts       ← wires consumer + health + graceful shutdown
+```
+
+---
+
+### `@docflow/pipeline-coordinator`
+
+Wins leader election, then schedules document jobs into the queue. Stands by silently as a follower.
+
+- Only the leader runs the scheduler. If the leader crashes, a new one is elected within the TTL window and the scheduler starts on that node. No duplicate scheduling, no gap in scheduling.
+- The scheduler batches up to 50 documents per poll tick using `addBulk()`. One Redis round-trip per batch instead of one per document.
+- Follower nodes stay running and connected to Redis — they're ready to take over immediately if the leader goes down.
+- In phase 4, the scheduler will query Postgres for pending documents. For now it holds them in memory so the pipeline is runnable without a database.
+
+**Files:**
+```
+services/pipeline-coordinator/src/
+├── scheduler.ts   ← polls for pending docs, enqueues jobs in batches of 50
+└── index.ts       ← leader election + scheduler + health + graceful shutdown
+```
+
+---
+
+### How phase 2 feeds phase 3
+
+The worker finishes processing and has a list of `DocumentChunk[]`. Right now it logs them and stops. Phase 3 picks up exactly at that point — takes the chunks, sends them to the AI inference layer for embedding, and writes the vectors to the sharded store.
