@@ -150,7 +150,7 @@ CI              GitHub Actions
 
 Each phase ships something runnable.
 
-1. **Queue + leader election** — core primitives
+1. **Queue + leader election** — core primitives ✓
 2. **Worker + pipeline coordinator** — batch layer functional end-to-end
 3. **AI inference + adapter** — embeddings flowing, provider switching works
 4. **Ingest service + storage ambassador** — full ingestion path live
@@ -158,3 +158,57 @@ Each phase ships something runnable.
 6. **API gateway** — public surface, auth, rate limiting
 7. **Infra** — observability stack, Kubernetes manifests
 8. **Load tests** — validate the scale targets are real
+
+---
+
+## Phase 1 — Queue + Leader Election
+
+### `@docflow/queue`
+
+Producer puts jobs in. Consumer pulls jobs out. Redis sits in the middle and holds the queue.
+
+```
+Producer → Redis → Consumer
+```
+
+- Workers **pull** — they ask Redis for the next job when ready. Redis never pushes.
+- `stop()` finishes the job in hand before shutting down. Never drops work mid-flight.
+- `addBulk()` writes all jobs in one call. Cheaper than looping over `add()`.
+
+**Files:**
+```
+packages/queue/src/
+├── types.ts      ← Producer, Consumer, QueueConfig interfaces
+├── producer.ts   ← createProducer<T>() — add, addBulk, close
+├── consumer.ts   ← createConsumer<T>() — start, stop (graceful drain)
+└── index.ts
+```
+
+---
+
+### `@docflow/leader-election`
+
+Multiple nodes all try to write the same key to Redis. Redis only lets one win — that's the lock. The winner is leader.
+
+- The leader refreshes the lock every 500ms. If it dies, the lock expires after 2 seconds and another node wins.
+- Heartbeat and release are Lua scripts — the check and the action happen in one atomic step. No race condition possible.
+- Nodes emit events: `elected`, `follower`, `revoked`. Your code reacts to those.
+
+**Files:**
+```
+packages/leader-election/src/
+├── types.ts     ← LeaderElection, LeaderElectionConfig, ElectionEvent
+├── election.ts  ← createLeaderElection() — SET NX PX + Lua heartbeat/release
+└── index.ts
+```
+
+---
+
+### How phase 1 feeds phase 2
+
+Phase 2 builds two things on top:
+
+- **Worker** — calls `createConsumer()`, processes documents
+- **Pipeline Coordinator** — calls `createLeaderElection()`, ensures only one node schedules jobs at a time
+
+Nothing in phase 1 changes from here forward.
