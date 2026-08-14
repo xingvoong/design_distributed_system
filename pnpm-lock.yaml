@@ -18,6 +18,18 @@ importers:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@20.19.43)
 
+  packages/ai-adapter:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.43
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@20.19.43)
+
   packages/leader-election:
     dependencies:
       ioredis:
@@ -61,6 +73,28 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+
+  services/ai-inference:
+    dependencies:
+      '@docflow/ai-adapter':
+        specifier: workspace:*
+        version: link:../../packages/ai-adapter
+      '@docflow/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      fastify:
+        specifier: ^4.0.0
+        version: 4.29.1
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.43
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@20.19.43)
 
   services/pipeline-coordinator:
     dependencies:

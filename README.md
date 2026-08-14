@@ -152,7 +152,7 @@ Each phase ships something runnable.
 
 1. **Queue + leader election** — core primitives ✓
 2. **Worker + pipeline coordinator** — batch layer functional end-to-end ✓
-3. **AI inference + adapter** — embeddings flowing, provider switching works
+3. **AI inference + adapter** — embeddings flowing, provider switching works ✓
 4. **Ingest service + storage ambassador** — full ingestion path live
 5. **Query service** — scatter/gather search across shards
 6. **API gateway** — public surface, auth, rate limiting
@@ -257,4 +257,100 @@ services/pipeline-coordinator/src/
 
 ### How phase 2 feeds phase 3
 
-The worker finishes processing and has a list of `DocumentChunk[]`. Right now it logs them and stops. Phase 3 picks up exactly at that point — takes the chunks, sends them to the AI inference layer for embedding, and writes the vectors to the sharded store.
+The worker finishes processing and has a list of `DocumentChunk[]`. It calls the ai-inference service, gets back vectors, and logs them. Phase 4 picks up from there — writes those vectors to the sharded pgvector store.
+
+---
+
+## Phase 3 — AI Inference + Adapter
+
+```
+services/worker
+    │
+    │  POST /embed  { chunks, tenantId, jobId }
+    ▼
+services/ai-inference  (port 3003)
+    │
+    │  batchChunks() — splits into ≤96 per call
+    │
+    ▼
+packages/ai-adapter
+    │
+    ├── primary circuit: CLOSED / OPEN / HALF_OPEN
+    │       │
+    │       │  POST /v1/embeddings
+    │       ▼
+    │   OpenAI / Voyage AI / any compatible API
+    │       │
+    │       │  { data: [{ embedding, index }] }
+    │       ▼
+    │   sort by index → number[][]
+    │
+    └── fallback circuit (if primary OPEN)
+            │
+            ▼
+        stub — returns zeros, same dimensions
+```
+
+**Circuit breaker state machine:**
+
+```
+          5 consecutive failures
+CLOSED ─────────────────────────► OPEN
+  ▲                                 │
+  │  probe succeeds                 │  30s cooldown
+  │                                 ▼
+  └──────────────────────── HALF_OPEN
+         probe fails → OPEN
+```
+
+---
+
+### `@docflow/ai-adapter`
+
+Provider-agnostic embedding layer. The worker never knows which company's API it's talking to.
+
+- `createHttpProvider()` calls any OpenAI-compatible embedding endpoint — OpenAI, Voyage AI, or a local model. Swapping providers is a config change, not a code change.
+- `createCircuitBreaker()` wraps any provider. Opens after 5 consecutive failures, waits 30s, then probes with a single request. Only one probe goes through at a time — no thundering herd on recovery.
+- `createStubProvider()` returns zero vectors at 1536 dimensions. Zeros are deterministic so tests are reproducible. 1536 matches `text-embedding-3-small` so pgvector's schema works with both.
+- `createAIAdapter()` routes requests — primary if its circuit is closed, fallback otherwise. The `circuitState()` method surfaces primary health for the readiness probe.
+
+**Files:**
+```
+packages/ai-adapter/src/
+├── types.ts           ← EmbeddingProvider, AIAdapter, CircuitState interfaces
+├── http-provider.ts   ← createHttpProvider() — OpenAI-compatible, 10s timeout, sorts by index
+├── stub.ts            ← createStubProvider() — zero vectors, 1536 dimensions
+├── circuit-breaker.ts ← createCircuitBreaker() — CLOSED/OPEN/HALF_OPEN state machine
+├── adapter.ts         ← createAIAdapter() — primary + fallback routing
+└── index.ts
+```
+
+---
+
+### `@docflow/ai-inference`
+
+HTTP service that wraps the adapter. Workers call this instead of managing their own provider connections.
+
+- `POST /embed` — accepts chunks, batches them into groups of ≤96, calls the adapter per batch, returns all embeddings in input order.
+- `GET /readyz` — returns 503 if the primary circuit is OPEN. Workers can check this before pulling jobs they can't process.
+- `GET /healthz` — always 200 if the process is alive. Separate from readiness so Kubernetes doesn't kill a pod just because a provider is down.
+
+**Files:**
+```
+services/ai-inference/src/
+├── batcher.ts   ← splits DocumentChunk[] into batches of ≤96
+├── routes.ts    ← POST /embed, GET /healthz, GET /readyz
+└── index.ts     ← Fastify setup, adapter init, graceful shutdown
+```
+
+---
+
+### Why a separate service instead of importing the package directly
+
+Workers could import `@docflow/ai-adapter` and call it inline. The problem: 10 worker replicas means 10 independent circuit breakers. One replica trips, the other 9 keep hammering a struggling provider. A single `ai-inference` service means one shared circuit state, one connection pool, one place API keys live.
+
+---
+
+### How phase 3 feeds phase 4
+
+The worker now calls `inference.embed(chunks)` and gets back `number[][]`. Phase 4 takes those vectors and writes them to the correct pgvector shard. The inference service interface doesn't change.

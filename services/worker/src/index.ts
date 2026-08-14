@@ -1,6 +1,7 @@
 import { createConsumer } from '@docflow/queue'
 import type { DocumentJob } from '@docflow/types'
 import { createHealthServer } from './health.js'
+import { createInferenceClient } from './inference-client.js'
 import { processDocument } from './processor.js'
 
 const config = {
@@ -12,10 +13,13 @@ const config = {
 
 const HEALTH_PORT = Number(process.env['HEALTH_PORT'] ?? 3001)
 const CONCURRENCY = Number(process.env['WORKER_CONCURRENCY'] ?? 5)
+const INFERENCE_URL = process.env['INFERENCE_URL'] ?? 'http://localhost:3003'
 
 async function main() {
   const health = createHealthServer(HEALTH_PORT)
   await health.start()
+
+  const inference = createInferenceClient(INFERENCE_URL)
 
   const consumer = createConsumer<DocumentJob>(
     config,
@@ -23,18 +27,18 @@ async function main() {
       console.log({ jobId, documentId: job.documentId, tenantId: job.tenantId }, 'processing job')
 
       const result = await processDocument(job)
+      const embeddings = await inference.embed(result.chunks, job.tenantId, jobId)
 
       console.log(
         {
           jobId,
           documentId: result.documentId,
           chunks: result.chunks.length,
+          embeddings: embeddings.length,
           processingMs: result.processingMs,
         },
-        'job complete',
+        'job complete — Phase 4 picks up here: write embeddings to pgvector',
       )
-
-      // Phase 3 picks up here: result.chunks → AI inference → vector store
     },
     CONCURRENCY,
   )

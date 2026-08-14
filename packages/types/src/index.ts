@@ -16,6 +16,12 @@ export interface DocumentChunk {
   tokenCount: number
 }
 
+// A chunk with its embedding vector — produced by ai-inference, stored in pgvector
+export interface EmbeddedChunk extends DocumentChunk {
+  embedding: number[]
+  embeddingModel: string
+}
+
 // Status a document moves through
 export type DocumentStatus =
   | 'pending'
