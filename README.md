@@ -1,13 +1,13 @@
 # DocFlow
 **Document Intelligence Infrastructure**
 
-A horizontally scalable platform that ingests documents at any volume, processes them through an AI pipeline, and serves sub-100ms semantic search across a sharded vector store.
+A horizontally scalable platform that ingests documents, processes them through an AI pipeline, and serves fast semantic search across a sharded vector store.
 
 ---
 
 ## The problem it solves
 
-Retrieval doesn't scale by default. A single-node vector store degrades as the corpus grows. A single worker falls over under bursty ingestion. One AI provider outage takes the whole system down. DocFlow is infrastructure built to handle all three.
+Retrieval doesn't scale by default. A single vector store degrades as the corpus grows. A single worker falls over under bursty load. One AI provider outage takes the whole system down. DocFlow handles all three.
 
 ---
 
@@ -165,15 +165,11 @@ Each phase ships something runnable.
 
 ### `@docflow/queue`
 
-Producer puts jobs in. Consumer pulls jobs out. Redis sits in the middle and holds the queue.
+Producer puts jobs in. Consumer pulls jobs out. Redis holds the queue.
 
 ```
 Producer → Redis → Consumer
 ```
-
-- Workers **pull** — they ask Redis for the next job when ready. Redis never pushes.
-- `stop()` finishes the job in hand before shutting down. Never drops work mid-flight.
-- `addBulk()` writes all jobs in one call. Cheaper than looping over `add()`.
 
 **Files:**
 ```
@@ -184,15 +180,17 @@ packages/queue/src/
 └── index.ts
 ```
 
+**Design choices:**
+
+- **Workers pull, Redis doesn't push.** A slow worker keeps getting more jobs if Redis pushes. With pulling, a slow worker just asks less often — it naturally controls its own load.
+- **`addBulk()` over looping `add()`.** Every `add()` is a round-trip to Redis. `addBulk()` does it in one. At high volume, the difference adds up.
+- **`stop()` drains before exit.** The consumer finishes the job it's on before shutting down. Never drops work mid-flight.
+
 ---
 
 ### `@docflow/leader-election`
 
-Multiple nodes all try to write the same key to Redis. Redis only lets one win — that's the lock. The winner is leader.
-
-- The leader refreshes the lock every 500ms. If it dies, the lock expires after 2 seconds and another node wins.
-- Heartbeat and release are Lua scripts — the check and the action happen in one atomic step. No race condition possible.
-- Nodes emit events: `elected`, `follower`, `revoked`. Your code reacts to those.
+Multiple nodes try to write the same key to Redis. Only one wins — that's the leader.
 
 **Files:**
 ```
@@ -202,14 +200,18 @@ packages/leader-election/src/
 └── index.ts
 ```
 
+**Design choices:**
+
+- **Lua scripts for heartbeat and release.** The heartbeat checks if this node owns the lock, then extends it. Without Lua, those are two separate commands — another node could steal the lock in between. Lua makes it one atomic step.
+- **Heartbeat interval must be shorter than TTL.** If the heartbeat fires every 10s but the lock expires after 5s, the lock dies before renewal. Another node wins, now two nodes think they're leader. This constraint is enforced at startup.
+- **Nodes emit events: `elected`, `follower`, `revoked`.** Your code reacts to state changes instead of polling `isLeader()` in a loop.
+
 ---
 
 ### How phase 1 feeds phase 2
 
-Phase 2 builds two things on top:
-
 - **Worker** — calls `createConsumer()`, processes documents
-- **Pipeline Coordinator** — calls `createLeaderElection()`, ensures only one node schedules jobs at a time
+- **Pipeline Coordinator** — calls `createLeaderElection()`, ensures only one node schedules jobs
 
 Nothing in phase 1 changes from here forward.
 
@@ -219,45 +221,48 @@ Nothing in phase 1 changes from here forward.
 
 ### `@docflow/worker`
 
-Pulls document jobs from the queue, extracts text, splits it into chunks, and hands the result to phase 3 for embedding.
-
-- `processDocument()` reads the file and routes it through `extractText()` based on MIME type. PDF binary parsing is a phase 3 concern — for now the pipeline stays runnable end-to-end.
-- `chunkText()` splits on sentence boundaries to avoid cutting mid-thought. Each chunk overlaps with the previous by 64 tokens — this preserves context at chunk edges when doing retrieval.
-- `stop()` signals the consumer to drain in-flight jobs before the process exits. Kubernetes sends `SIGTERM` before killing the pod — this gives workers time to finish without dropping work.
-- `/healthz` and `/readyz` are separate endpoints. Liveness tells Kubernetes the process is alive. Readiness tells it whether to send traffic. The worker marks itself not-ready during shutdown so the load balancer stops routing jobs to it.
+Pulls jobs from the queue, extracts text, splits into chunks, sends to ai-inference for embedding.
 
 **Files:**
 ```
 services/worker/src/
-├── chunker.ts     ← splits text into overlapping chunks, sentence-aware
-├── processor.ts   ← reads file, extracts text, calls chunker
-├── health.ts      ← /healthz and /readyz for Kubernetes probes
-└── index.ts       ← wires consumer + health + graceful shutdown
+├── chunker.ts          ← sentence-aware chunking with overlap
+├── processor.ts        ← reads file, extracts text, calls chunker
+├── inference-client.ts ← HTTP client for ai-inference service
+├── health.ts           ← /healthz and /readyz for Kubernetes probes
+└── index.ts            ← wires consumer + inference + health + graceful shutdown
 ```
+
+**Design choices:**
+
+- **Split on sentences, not characters.** Cutting at a fixed character count lands mid-sentence. You get a chunk that starts or ends in the middle of a thought. Sentence boundaries keep each chunk coherent.
+- **64-token overlap between chunks.** Adjacent chunks share 64 tokens at their boundary. Without overlap, a sentence spanning two chunks gets split — a search query matching that sentence won't find a complete answer in either chunk.
+- **Two health endpoints, not one.** `/healthz` means "is the process alive." `/readyz` means "is it ready for traffic." During shutdown, the worker flips readiness to false first — Kubernetes stops sending jobs — then drains what's in flight. One combined endpoint would cause Kubernetes to kill the pod mid-drain.
 
 ---
 
 ### `@docflow/pipeline-coordinator`
 
-Wins leader election, then schedules document jobs into the queue. Stands by silently as a follower.
-
-- Only the leader runs the scheduler. If the leader crashes, a new one is elected within the TTL window and the scheduler starts on that node. No duplicate scheduling, no gap in scheduling.
-- The scheduler batches up to 50 documents per poll tick using `addBulk()`. One Redis round-trip per batch instead of one per document.
-- Follower nodes stay running and connected to Redis — they're ready to take over immediately if the leader goes down.
-- In phase 4, the scheduler will query Postgres for pending documents. For now it holds them in memory so the pipeline is runnable without a database.
+Wins leader election, then schedules document jobs into the queue. Stands by as a follower otherwise.
 
 **Files:**
 ```
 services/pipeline-coordinator/src/
-├── scheduler.ts   ← polls for pending docs, enqueues jobs in batches of 50
+├── scheduler.ts   ← polls for pending docs, enqueues in batches of 50
 └── index.ts       ← leader election + scheduler + health + graceful shutdown
 ```
+
+**Design choices:**
+
+- **Only the leader runs the scheduler.** Without this, multiple coordinators enqueue the same documents at the same time. Leader election ensures exactly one node schedules at a time.
+- **Followers stay running.** A follower that already has a Redis connection wins the next election immediately when the leader crashes. A follower that shut itself down has to reconnect first. Staying alive costs almost nothing and makes failover faster.
+- **Batches of 50 via `addBulk()`.** One Redis round-trip per batch instead of one per document.
 
 ---
 
 ### How phase 2 feeds phase 3
 
-The worker finishes processing and has a list of `DocumentChunk[]`. It calls the ai-inference service, gets back vectors, and logs them. Phase 4 picks up from there — writes those vectors to the sharded pgvector store.
+The worker chunks the document and calls ai-inference to get embeddings. Phase 3 builds the inference service that handles that call.
 
 ---
 
@@ -281,11 +286,10 @@ packages/ai-adapter
     │       ▼
     │   OpenAI / Voyage AI / any compatible API
     │       │
-    │       │  { data: [{ embedding, index }] }
     │       ▼
     │   sort by index → number[][]
     │
-    └── fallback circuit (if primary OPEN)
+    └── fallback (if primary OPEN)
             │
             ▼
         stub — returns zeros, same dimensions
@@ -307,33 +311,31 @@ CLOSED ────────────────────────�
 
 ### `@docflow/ai-adapter`
 
-Provider-agnostic embedding layer. The worker never knows which company's API it's talking to.
-
-- `createHttpProvider()` calls any OpenAI-compatible embedding endpoint — OpenAI, Voyage AI, or a local model. Swapping providers is a config change, not a code change.
-- `createCircuitBreaker()` wraps any provider. Opens after 5 consecutive failures, waits 30s, then probes with a single request. Only one probe goes through at a time — no thundering herd on recovery.
-- `createStubProvider()` returns zero vectors at 1536 dimensions. Zeros are deterministic so tests are reproducible. 1536 matches `text-embedding-3-small` so pgvector's schema works with both.
-- `createAIAdapter()` routes requests — primary if its circuit is closed, fallback otherwise. The `circuitState()` method surfaces primary health for the readiness probe.
+Provider-agnostic embedding layer. The worker never knows which API it's talking to.
 
 **Files:**
 ```
 packages/ai-adapter/src/
 ├── types.ts           ← EmbeddingProvider, AIAdapter, CircuitState interfaces
-├── http-provider.ts   ← createHttpProvider() — OpenAI-compatible, 10s timeout, sorts by index
+├── http-provider.ts   ← createHttpProvider() — OpenAI-compatible, 10s timeout
 ├── stub.ts            ← createStubProvider() — zero vectors, 1536 dimensions
 ├── circuit-breaker.ts ← createCircuitBreaker() — CLOSED/OPEN/HALF_OPEN state machine
 ├── adapter.ts         ← createAIAdapter() — primary + fallback routing
 └── index.ts
 ```
 
+**Design choices:**
+
+- **OpenAI-compatible HTTP interface.** Anthropic doesn't have native embeddings. Their embedding product (Voyage AI) uses the same request format as OpenAI. Targeting that format means swapping providers is a config change, not a code change.
+- **Circuit opens on 5 consecutive failures, not 5 total.** A flaky provider that mostly works shouldn't trip the circuit. You need 5 failures in a row — the count resets on any success.
+- **One probe at a time in HALF_OPEN.** When the cooldown ends, multiple requests can arrive at once. Without a lock, all of them probe simultaneously — a burst hitting a provider that's still recovering. One probe tells you what you need to know.
+- **Stub returns zeros, not random vectors.** Random vectors make tests non-reproducible. Zeros are deterministic. Stub uses 1536 dimensions to match the real provider so pgvector's schema works with both.
+
 ---
 
 ### `@docflow/ai-inference`
 
 HTTP service that wraps the adapter. Workers call this instead of managing their own provider connections.
-
-- `POST /embed` — accepts chunks, batches them into groups of ≤96, calls the adapter per batch, returns all embeddings in input order.
-- `GET /readyz` — returns 503 if the primary circuit is OPEN. Workers can check this before pulling jobs they can't process.
-- `GET /healthz` — always 200 if the process is alive. Separate from readiness so Kubernetes doesn't kill a pod just because a provider is down.
 
 **Files:**
 ```
@@ -343,14 +345,13 @@ services/ai-inference/src/
 └── index.ts     ← Fastify setup, adapter init, graceful shutdown
 ```
 
----
+**Design choices:**
 
-### Why a separate service instead of importing the package directly
-
-Workers could import `@docflow/ai-adapter` and call it inline. The problem: 10 worker replicas means 10 independent circuit breakers. One replica trips, the other 9 keep hammering a struggling provider. A single `ai-inference` service means one shared circuit state, one connection pool, one place API keys live.
+- **Separate service, not a package import.** Workers could import `@docflow/ai-adapter` directly. The problem: 10 worker replicas means 10 independent circuit breakers — one trips while the other 9 keep hammering a struggling provider. One service means one shared circuit state, one connection pool, one place API keys live.
+- **`/readyz` reflects circuit state.** Returns 503 when the primary circuit is OPEN. Workers check this before pulling jobs they can't process.
 
 ---
 
 ### How phase 3 feeds phase 4
 
-The worker now calls `inference.embed(chunks)` and gets back `number[][]`. Phase 4 takes those vectors and writes them to the correct pgvector shard. The inference service interface doesn't change.
+The worker calls `inference.embed(chunks)` and gets back `number[][]`. Phase 4 writes those vectors to the correct pgvector shard. The inference interface doesn't change.
