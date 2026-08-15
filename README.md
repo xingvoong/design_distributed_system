@@ -153,7 +153,7 @@ Each phase ships something runnable.
 1. **Queue + leader election** — core primitives ✓
 2. **Worker + pipeline coordinator** — batch layer functional end-to-end ✓
 3. **AI inference + adapter** — embeddings flowing, provider switching works ✓
-4. **Ingest service + storage ambassador** — full ingestion path live
+4. **Ingest service + storage ambassador** — full ingestion path live ✓
 5. **Query service** — scatter/gather search across shards
 6. **API gateway** — public surface, auth, rate limiting
 7. **Infra** — observability stack, Kubernetes manifests
@@ -355,3 +355,140 @@ services/ai-inference/src/
 ### How phase 3 feeds phase 4
 
 The worker calls `inference.embed(chunks)` and gets back `number[][]`. Phase 4 writes those vectors to the correct pgvector shard. The inference interface doesn't change.
+
+---
+
+## Phase 4 — Ingest Service + Storage Ambassador
+
+```
+curl POST /ingest  { file, tenantId }
+    │
+    ▼
+services/ingest-service  (port 3004)
+    │
+    │  detectMimeType(filename)
+    │  ambassador.put(tenantId/documentId/filename, buffer)
+    │
+    │  POST /internal/register  { documentId, tenantId, source, mimeType, sizeBytes }
+    │
+    ▼
+services/pipeline-coordinator  (port 3002)
+    │
+    │  scheduler.enqueue(doc)   ← in-memory pending queue
+    │  poll every 5s → producer.addBulk(jobs)
+    │
+    ▼
+Redis queue  (BullMQ)
+    │
+    ▼
+services/worker
+    │
+    │  ambassador.get(source)   ← reads file from shared storage volume
+    │  chunkText() → DocumentChunk[]
+    │
+    │  POST /embed  { chunks, tenantId, jobId }
+    │
+    ▼
+services/ai-inference  (port 3003)
+    │
+    │  stub provider → number[][]  (zeros, 1536 dimensions)
+    │
+    ▼
+services/worker  (continued)
+    │
+    │  writeEmbeddedChunks(db, chunks)
+    │
+    ▼
+PostgreSQL + pgvector
+    └── EmbeddedChunk table
+            documentId, tenantId, chunkIndex, text, embedding vector(1536)
+```
+
+**Storage flow:**
+
+```
+ingest-service               worker
+     │                          │
+     │  put(key, buffer)        │  get(key)
+     ▼                          ▼
+/uploads volume  ──────────  /uploads volume
+  (shared between containers via Docker volume)
+
+key format: tenantId/documentId/filename
+```
+
+**Full ingestion path — verified by smoke test:**
+
+```
+POST /ingest
+  → store file
+  → register with coordinator
+  → coordinator enqueues job (next poll, ≤5s)
+  → worker reads file, chunks it
+  → worker calls ai-inference
+  → worker writes embeddings to pgvector
+  → SELECT count(*) FROM "EmbeddedChunk"  →  N rows
+```
+
+---
+
+### `@docflow/storage-ambassador`
+
+Abstracts where files live. The worker and ingest service both call the ambassador — neither knows if files are on local disk or S3.
+
+**Files:**
+```
+packages/storage-ambassador/src/
+├── types.ts   ← StorageAmbassador interface: get(key), put(key, data, mimeType)
+├── local.ts   ← createLocalAmbassador(baseDir) — disk implementation
+└── index.ts
+```
+
+**Design choices:**
+
+- **Absolute paths pass through unchanged.** `get('/data/ml-systems.txt')` reads that exact path. This keeps existing seeder jobs working without format changes.
+- **key = tenantId/documentId/filename.** Mirrors S3 prefix structure. Swapping to an S3 implementation later requires no key format change — just a new provider.
+
+---
+
+### `@docflow/db`
+
+Prisma client + pgvector write helper. The worker depends on this; nothing else does.
+
+**Files:**
+```
+packages/db/
+├── prisma/schema.prisma                    ← EmbeddedChunk model, vector(1536) column
+├── prisma/migrations/0001_init/migration.sql  ← CREATE EXTENSION vector + table
+├── src/client.ts                           ← createPrismaClient()
+└── src/embedded-chunks.ts                  ← writeEmbeddedChunks() via $executeRaw
+```
+
+**Design choices:**
+
+- **`$executeRaw` for vector inserts.** Prisma marks `vector(1536)` as `Unsupported` — it can't generate parameterized SQL for it. `$executeRaw` passes the vector as a string cast: `'[0.1, 0.2, ...]'::vector`. PostgreSQL handles the cast.
+- **Migration runs as an init container.** The `migrate` service in docker-compose runs `prisma migrate deploy` and exits before the worker starts. The worker has `depends_on: migrate: condition: service_completed_successfully`.
+
+---
+
+### `services/ingest-service`
+
+Entry point for all documents. Accepts uploads, stores them, and hands off to the coordinator.
+
+**Files:**
+```
+services/ingest-service/src/
+├── detect-mime.ts   ← maps .txt/.md/.pdf extensions to DocumentJob mimeType
+└── index.ts         ← POST /ingest (multipart), GET /healthz
+```
+
+**Design choices:**
+
+- **HTTP to coordinator, not in-process.** The ingest service is a separate container. The coordinator exposes `POST /internal/register` so any replica can receive documents. The scheduler on the current leader picks them up on the next 5s poll.
+- **202 on registration, not completion.** The response returns as soon as the job is queued — not after embeddings are written. The caller gets a `documentId` to track status later. Blocking until pgvector writes would make uploads as slow as the full pipeline.
+
+---
+
+### How phase 4 feeds phase 5
+
+Phase 5 is the query service — scatter/gather semantic search across pgvector shards. The `EmbeddedChunk` rows written here are what it searches. The schema is fixed: `embedding vector(1536)`, indexed by `tenantId` and `documentId`.

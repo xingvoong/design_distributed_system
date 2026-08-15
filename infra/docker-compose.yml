@@ -97,8 +97,7 @@ services:
     ports:
       - "3001:3001"
     environment:
-      <<: *redis-env
-      <<: *db-env
+      <<: [*redis-env, *db-env]
       HEALTH_PORT: "3001"
       INFERENCE_URL: http://ai-inference:3003
       STORAGE_BASE: /uploads
