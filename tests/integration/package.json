@@ -1,0 +1,23 @@
+{
+  "name": "@docflow/integration-tests",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@docflow/db": "workspace:*",
+    "@docflow/queue": "workspace:*",
+    "@docflow/storage-ambassador": "workspace:*",
+    "@docflow/types": "workspace:*",
+    "@prisma/client": "^5.0.0",
+    "fastify": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

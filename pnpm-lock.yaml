@@ -218,6 +218,37 @@ importers:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@20.19.43)
 
+  tests/integration:
+    dependencies:
+      '@docflow/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@docflow/queue':
+        specifier: workspace:*
+        version: link:../../packages/queue
+      '@docflow/storage-ambassador':
+        specifier: workspace:*
+        version: link:../../packages/storage-ambassador
+      '@docflow/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@prisma/client':
+        specifier: ^5.0.0
+        version: 5.22.0(prisma@5.22.0)
+      fastify:
+        specifier: ^4.0.0
+        version: 4.29.1
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.0
+        version: 20.19.43
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.0
+        version: 2.1.9(@types/node@20.19.43)
+
 packages:
 
   '@esbuild/aix-ppc64@0.21.5':
