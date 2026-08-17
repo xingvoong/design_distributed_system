@@ -155,7 +155,7 @@ Each phase ships something runnable.
 3. **AI inference + adapter** — embeddings flowing, provider switching works ✓
 4. **Ingest service + storage ambassador** — full ingestion path live ✓
 5. **Query service** — scatter/gather search across shards ✓
-6. **API gateway** — public surface, auth, rate limiting
+6. **API gateway** — public surface, auth, rate limiting ✓
 7. **Infra** — observability stack, Kubernetes manifests
 8. **Load tests** — validate the scale targets are real
 
@@ -463,3 +463,55 @@ services/query-service/src/
 ### How phase 5 feeds phase 6
 
 The query service is the internal search layer. Phase 6 (API gateway) sits in front of it — handles auth, rate limiting, and tenant routing before proxying to `/query`.
+
+---
+
+## Phase 6 — API Gateway
+
+```
+client
+    │  X-API-Key: dev-key-1
+    │  POST /ingest  or  POST /query
+    ▼
+api-gateway (3000)
+    │
+    ├── auth middleware
+    │     valid key?  → continue
+    │     missing/wrong key → 401
+    │
+    ├── rate limiter (per tenant)
+    │     under limit?  → continue
+    │     over limit    → 429 + retryAfterMs
+    │
+    ├── POST /ingest ──────────────► ingest-service (3004)
+    │                                     │
+    │                                  202 { documentId }
+    │                                     │
+    └── POST /query ───────────────► query-service (3005)
+                                          │
+                                       { results[], durationMs }
+```
+
+**Files:**
+```
+services/api-gateway/src/
+├── auth.ts          ← createAuthHandler() — X-API-Key header validation
+├── rate-limiter.ts  ← createRateLimiter() — per-tenant token bucket
+├── routes.ts        ← POST /ingest, POST /query, /healthz, /readyz
+├── types.d.ts       ← FastifyRequest augmented with rawBody
+└── index.ts         ← Fastify setup, raw body capture, graceful shutdown
+```
+
+**Design choices:**
+
+- **Auth runs before rate limiting.** An invalid API key is rejected immediately — the rate limiter never sees the request. This matters because rate limiting is keyed by tenant, and an unauthenticated request has no tenant. Running them in order keeps both pieces simpler.
+- **Rate limiting is per tenant, not per IP.** IP-based limiting breaks behind a load balancer — every request looks like it comes from the same IP. Tenant ID is in the request body, so each tenant gets their own independent bucket regardless of where the request originates.
+- **In-memory token bucket, not Redis.** Redis-backed rate limiting is consistent across multiple gateway replicas. In-memory is not — if you run three gateway replicas, each has its own counter and a tenant gets 3× the limit. For a single replica this is correct and simpler. Phase 7 (infra) is the right time to swap to Redis if needed.
+- **Proxy forwards the raw body verbatim.** Parsing and re-serializing the request body would change it — multipart boundaries would break, JSON formatting might shift. Capturing the raw bytes and forwarding them unchanged means ingest-service and query-service see exactly what the client sent.
+- **`/readyz` pings both upstreams.** The gateway is only ready if ingest-service and query-service are both reachable. A gateway that's up but routing to a dead service is worse than a gateway that's marked not ready — Kubernetes will stop sending traffic and let another replica handle it.
+
+---
+
+### How phase 6 feeds phase 7
+
+The gateway is the public entry point. Phase 7 wires up the observability stack (Prometheus, Grafana) and Kubernetes manifests so the whole system is deployable and monitorable.
