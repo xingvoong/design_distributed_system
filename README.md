@@ -452,11 +452,11 @@ services/query-service/src/
 
 **Design choices:**
 
-- **`Promise.allSettled`, not `Promise.all`, for scatter.** `Promise.all` rejects the moment any shard fails. `Promise.allSettled` lets all shards run and collects what succeeded. A shard going down returns partial results instead of a 500 — partial is better.
-- **Each shard returns local top-K, then global re-rank.** Asking each shard for 1 result and merging doesn't work — the globally best result might be in position 3 on its shard, behind two weaker results. Each shard returns top-K locally; you merge everything and re-sort to get the true global top-K.
-- **Query service calls ai-inference for embedding — doesn't own its own AI connection.** If it managed its own circuit breaker, it would be a separate circuit from the workers' circuit. Two circuits means the threshold for opening doubles, and you lose the shared state that makes the circuit useful. One service, one circuit.
-- **`SHARD_URLS` as a comma-separated env var.** One URL means one shard — works in dev with no changes. Adding a shard is adding a URL. No code change, no redeployment of anything except the query service.
-- **`::float8` cast on the score column.** pgvector returns cosine distance as `float4`. Prisma maps `float4` inconsistently across drivers. Casting to `float8` in the query ensures it arrives as a clean JS `number`.
+- **`Promise.allSettled` instead of `Promise.all` for scatter.** `Promise.all` fails the entire request the moment one shard errors. `Promise.allSettled` waits for every shard and keeps whatever succeeded. If shard 1 is down, you still get results from shards 0 and 2. A degraded response is better than an error.
+- **Each shard returns its local top-K before merging.** The naive approach is to ask each shard for 1 result and pick the best. That breaks when the true best result is ranked 3rd on its shard — it never makes it into the merge pool. The fix: each shard returns top-K candidates, then you merge all of them and re-sort globally. More data transferred, but the ranking is correct.
+- **Embedding happens in ai-inference, not here.** The query service sends the query text to ai-inference and gets a vector back — same endpoint the workers use. The alternative is giving the query service its own AI client and circuit breaker. That means two independent circuits for the same provider: workers could be on a tripped circuit while the query service keeps hammering it, or vice versa. Sharing one service means one circuit, one connection pool, one place the API key lives.
+- **`SHARD_URLS` is a comma-separated list of connection strings.** In development, you set one URL and get one shard. In production, you set three and get three — no code changes, just config. Adding a shard without downtime is just a redeploy of the query service with an updated env var.
+- **`::float8` cast on the distance score.** pgvector stores cosine distance as a 32-bit float (`float4`). When Prisma reads it back through the raw query, the type mapping is inconsistent — sometimes it comes back as a string, sometimes a number, depending on the driver version. Casting to `float8` in the SQL forces PostgreSQL to return a 64-bit float, which always maps to a JS `number` cleanly.
 
 ---
 
