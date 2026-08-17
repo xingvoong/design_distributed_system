@@ -154,7 +154,7 @@ Each phase ships something runnable.
 2. **Worker + pipeline coordinator** — batch layer functional end-to-end ✓
 3. **AI inference + adapter** — embeddings flowing, provider switching works ✓
 4. **Ingest service + storage ambassador** — full ingestion path live ✓
-5. **Query service** — scatter/gather search across shards
+5. **Query service** — scatter/gather search across shards ✓
 6. **API gateway** — public surface, auth, rate limiting
 7. **Infra** — observability stack, Kubernetes manifests
 8. **Load tests** — validate the scale targets are real
@@ -408,3 +408,58 @@ services/ingest-service/src/
 ### How phase 4 feeds phase 5
 
 The `EmbeddedChunk` rows written here are what the query service searches. Schema is fixed: `embedding vector(1536)`, indexed by `tenantId`.
+
+---
+
+## Phase 5 — Query Service
+
+```
+POST /query { query, tenantId, topK }
+    │
+    ▼
+query-service (3005)
+    │  embed query text
+    │  POST /embed → ai-inference (3003)
+    │  ← number[1536]
+    │
+    │  scatter ──────────────────────────────┐
+    │                                        │
+    ▼                  ▼                     ▼
+Shard 0            Shard 1              Shard 2
+(pgvector)         (pgvector)           (pgvector)
+embedding <=>      embedding <=>        embedding <=>
+queryVec           queryVec             queryVec
+local top-K        local top-K          local top-K
+    │                  │                     │
+    └──────────────────┴─────────────────────┘
+                        │  gather
+                        │  merge + re-rank by score
+                        │  global top-K
+                        ▼
+              { results[], durationMs }
+```
+
+**Files:**
+```
+packages/db/src/
+└── search-chunks.ts     ← searchEmbeddedChunks() via $queryRaw + <=> operator
+
+services/query-service/src/
+├── scatter-gather.ts    ← Promise.allSettled fan-out, merge, re-rank
+├── routes.ts            ← POST /query, GET /healthz, GET /readyz
+└── index.ts             ← shard clients from SHARD_URLS, graceful shutdown
+```
+
+**Design choices:**
+
+- **`Promise.allSettled`, not `Promise.all`, for scatter.** `Promise.all` rejects the moment any shard fails. `Promise.allSettled` lets all shards run and collects what succeeded. A shard going down returns partial results instead of a 500 — partial is better.
+- **Each shard returns local top-K, then global re-rank.** Asking each shard for 1 result and merging doesn't work — the globally best result might be in position 3 on its shard, behind two weaker results. Each shard returns top-K locally; you merge everything and re-sort to get the true global top-K.
+- **Query service calls ai-inference for embedding — doesn't own its own AI connection.** If it managed its own circuit breaker, it would be a separate circuit from the workers' circuit. Two circuits means the threshold for opening doubles, and you lose the shared state that makes the circuit useful. One service, one circuit.
+- **`SHARD_URLS` as a comma-separated env var.** One URL means one shard — works in dev with no changes. Adding a shard is adding a URL. No code change, no redeployment of anything except the query service.
+- **`::float8` cast on the score column.** pgvector returns cosine distance as `float4`. Prisma maps `float4` inconsistently across drivers. Casting to `float8` in the query ensures it arrives as a clean JS `number`.
+
+---
+
+### How phase 5 feeds phase 6
+
+The query service is the internal search layer. Phase 6 (API gateway) sits in front of it — handles auth, rate limiting, and tenant routing before proxying to `/query`.
