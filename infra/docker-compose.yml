@@ -127,6 +127,26 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  api-gateway:
+    <<: *build
+    working_dir: /app/services/api-gateway
+    command: node dist/index.js
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      INGEST_URL: http://ingest-service:3004
+      QUERY_URL: http://query-service:3005
+      # Comma-separated list of valid API keys
+      API_KEYS: "dev-key-1,dev-key-2"
+      RATE_LIMIT_MAX: "100"
+      RATE_LIMIT_WINDOW_MS: "60000"
+    depends_on:
+      ingest-service:
+        condition: service_started
+      query-service:
+        condition: service_started
+
   seeder:
     <<: *build
     # Run from packages/queue where bullmq is a direct dependency
