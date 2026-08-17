@@ -109,6 +109,24 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  query-service:
+    <<: *build
+    working_dir: /app/services/query-service
+    command: node dist/index.js
+    ports:
+      - "3005:3005"
+    environment:
+      <<: *db-env
+      PORT: "3005"
+      INFERENCE_URL: http://ai-inference:3003
+      # Single shard for now — SHARD_URLS overrides DATABASE_URL when set
+      SHARD_URLS: postgresql://docflow:docflow@postgres:5432/docflow
+    depends_on:
+      ai-inference:
+        condition: service_started
+      migrate:
+        condition: service_completed_successfully
+
   seeder:
     <<: *build
     # Run from packages/queue where bullmq is a direct dependency

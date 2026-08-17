@@ -1,3 +1,5 @@
 export { createPrismaClient } from './client.js'
 export { writeEmbeddedChunks } from './embedded-chunks.js'
 export type { ChunkToWrite } from './embedded-chunks.js'
+export { searchEmbeddedChunks } from './search-chunks.js'
+export type { ChunkSearchResult } from './search-chunks.js'
