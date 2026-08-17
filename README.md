@@ -156,7 +156,7 @@ Each phase ships something runnable.
 4. **Ingest service + storage ambassador** — full ingestion path live ✓
 5. **Query service** — scatter/gather search across shards ✓
 6. **API gateway** — public surface, auth, rate limiting ✓
-7. **Infra** — observability stack, Kubernetes manifests
+7. **Infra** — observability stack, Kubernetes manifests ✓
 8. **Load tests** — validate the scale targets are real
 
 ---
@@ -492,3 +492,46 @@ services/api-gateway/src/
 ### How phase 6 feeds phase 7
 
 The gateway is the public entry point. Phase 7 wires up the observability stack (Prometheus, Grafana) and Kubernetes manifests so the whole system is deployable and monitorable.
+
+---
+
+## Phase 7 — Infra
+
+```
+                    ┌─────────────────────────┐
+                    │  Prometheus (9090)       │
+                    │  scrapes /metrics every  │
+                    │  15s from all services   │
+                    └──────────┬──────────────┘
+                               │
+                    ┌──────────▼──────────────┐
+                    │  Grafana (3006)          │
+                    │  - requests/sec          │
+                    │  - p99 latency           │
+                    │  - error rate            │
+                    │  - service up/down       │
+                    └─────────────────────────┘
+
+Kubernetes (infra/k8s/)
+├── namespace.yaml              ← docflow namespace
+├── configmap.yaml              ← shared env vars
+├── secret.yaml                 ← DB URL, API keys, embedding key
+├── redis.yaml                  ← Deployment + Service
+├── postgres.yaml               ← StatefulSet + Service + 20Gi PVC
+├── api-gateway.yaml            ← Deployment + LoadBalancer + HPA (3–10 replicas)
+├── worker.yaml                 ← Deployment + HPA (3–20 replicas) + 50Gi PVC
+├── ingest-service.yaml         ← Deployment + Service
+├── query-service.yaml          ← Deployment + Service
+├── ai-inference.yaml           ← Deployment + Service
+└── pipeline-coordinator.yaml   ← Deployment + Service
+```
+
+**Design choice:**
+
+- **HPA on worker and gateway, not on every service.** The worker is the bottleneck under load — it does CPU-heavy chunking and blocks on pgvector writes. The gateway is the entry point and needs to handle traffic spikes. The other services (coordinator, ai-inference, query) have more predictable load and scale manually.
+
+---
+
+### How phase 7 feeds phase 8
+
+With Prometheus collecting metrics, Phase 8 (load tests) can validate the scale targets against real numbers — requests/sec, p99 latency, and error rate visible in Grafana as load increases.
