@@ -571,46 +571,27 @@ GATEWAY_URL=http://localhost:3000 k6 run tests/load/spike.js
 
 ## Wrap-up
 
-Eight phases. One complete system.
+Eight phases. Document upload to sub-100ms semantic search, sharded across Postgres, with auth, rate limiting, circuit breakers, and Kubernetes autoscaling.
 
-Start with a document upload. End with a sub-100ms semantic search across 50M+ embeddings, sharded across Postgres instances, with auth, rate limiting, circuit breakers, graceful shutdown, and Kubernetes autoscaling.
+Production-grade isn't a feature list. It's what the system does when things go wrong — a worker crashes and the job reruns, a shard goes down and queries degrade instead of fail, a tenant floods the gateway and everyone else is unaffected.
 
-Every layer is connected. Phase 1's queue feeds Phase 2's worker. Phase 3's circuit breaker protects Phase 4's embeddings. Phase 5's scatter/gather serves Phase 6's gateway. Phase 7 makes all of it visible. Phase 8 proves it holds.
-
-**What production-grade actually means:**
-
-It's not a feature list. It's a set of properties the system has under adversity:
-
-- A worker crashes mid-job — the job reruns, no data lost
-- The AI provider goes down — the circuit opens, the stub takes over, workers keep processing
-- One pgvector shard goes offline — queries degrade gracefully, other shards still return results
-- A tenant floods the gateway — rate limiter catches it, other tenants are unaffected
-- You deploy a new worker version — pods drain their current jobs before terminating
-
-None of these required special handling at the call site. They're baked into the architecture.
+None of that required special handling at the call site. It's baked into the architecture.
 
 ---
 
 ## TypeScript over Python
 
-Python is the default for backend systems, especially anything touching AI. Here's what TypeScript earns instead.
+Three things TypeScript earns that Python doesn't:
 
-**Types catch entire categories of bugs at compile time.** The `ChunkToWrite` interface means you can't accidentally pass a string where an embedding vector goes. The `CircuitState` union means the circuit breaker can only be in states the compiler knows about. In Python, these are runtime errors you find in production. In TypeScript, they're red underlines you fix before running anything.
-
-**The async model is explicit.** Every function that touches the network or disk is `async`. Every call that could fail is `await`-ed. You can read the code and know exactly where it yields. Python's `asyncio` is powerful but mixes sync and async code in ways that create subtle bugs — calling a sync function in an async context blocks the event loop silently.
-
-**Refactoring is safe at scale.** When we changed `createPrismaClient` to accept an optional URL parameter, TypeScript immediately flagged every call site. In a Python codebase of this size, that's a grep and a prayer. The compiler is a free QA pass on every change.
-
-Python is still the right choice when you're moving fast on data work, prototyping, or the ecosystem you need only exists there. But for a system this interconnected — where the queue type flows into the worker, which flows into the inference client, which flows into the DB write — TypeScript's type system pays for itself many times over.
+- **Compile-time correctness.** You can't pass a string where an embedding vector goes. Wrong types are red underlines, not production incidents.
+- **Explicit async.** Every network call is visibly `async/await`. Python's asyncio silently blocks the event loop when you call sync code in an async context.
+- **Safe refactoring.** When `createPrismaClient` got a new parameter, the compiler flagged every call site. In Python that's a grep and a prayer.
 
 ---
 
 ## Takeaways
 
-**Distributed systems are an exercise in failure modes.** Every design decision in this codebase — circuit breakers, `Promise.allSettled`, graceful shutdown, leader election, two health endpoints — exists because something can go wrong. The question is whether the failure is silent or loud, recoverable or catastrophic.
-
-**Shared state is the root of most complexity.** Leader election exists because two coordinators sharing the same queue without coordination would double-enqueue every job. The circuit breaker is a service instead of a package import because shared circuit state beats 10 independent ones. When something feels complicated, ask what shared state is causing it.
-
-**Async by default, sync only when you must.** Ingest returns 202 immediately. The pipeline runs in the background. The caller never waits for the full embedding pipeline. This is what makes 10,000 docs/hour possible — the HTTP response is decoupled from the actual work.
-
-**The boring parts matter more than the interesting parts.** The queue, the health endpoints, the graceful shutdown, the migration init container — none of that is clever. All of it is what separates a system that runs in production from one that works in a demo.
+- **Every design decision is a failure mode.** Circuit breakers, `Promise.allSettled`, graceful shutdown, two health endpoints — all of it exists because something will go wrong. The question is whether the failure is recoverable.
+- **Shared state is the root of complexity.** The circuit breaker is a service, not a package import, because shared circuit state beats 10 independent ones. When something feels complicated, find the shared state.
+- **Async by default.** Ingest returns 202 immediately. The pipeline runs in the background. Decoupling the HTTP response from the work is what makes 10,000 docs/hour possible.
+- **The boring parts matter most.** Health endpoints, graceful shutdown, migration init containers — none of it is clever. All of it is what separates a system that runs in production from one that works in a demo.
