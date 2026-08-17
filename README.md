@@ -180,11 +180,9 @@ packages/queue/src/
 └── index.ts
 ```
 
-**Design choices:**
+**Design choice:**
 
 - **Workers pull, Redis doesn't push.** A slow worker keeps getting more jobs if Redis pushes. With pulling, a slow worker just asks less often — it naturally controls its own load.
-- **`addBulk()` over looping `add()`.** Every `add()` is a round-trip to Redis. `addBulk()` does it in one. At high volume, the difference adds up.
-- **`stop()` drains before exit.** The consumer finishes the job it's on before shutting down. Never drops work mid-flight.
 
 ---
 
@@ -200,11 +198,9 @@ packages/leader-election/src/
 └── index.ts
 ```
 
-**Design choices:**
+**Design choice:**
 
 - **Lua scripts for heartbeat and release.** The heartbeat checks if this node owns the lock, then extends it. Without Lua, those are two separate commands — another node could steal the lock in between. Lua makes it one atomic step.
-- **Heartbeat interval must be shorter than TTL.** If the heartbeat fires every 10s but the lock expires after 5s, the lock dies before renewal. Another node wins, now two nodes think they're leader. This constraint is enforced at startup.
-- **Nodes emit events: `elected`, `follower`, `revoked`.** Your code reacts to state changes instead of polling `isLeader()` in a loop.
 
 ---
 
@@ -233,10 +229,8 @@ services/worker/src/
 └── index.ts            ← wires consumer + inference + health + graceful shutdown
 ```
 
-**Design choices:**
+**Design choice:**
 
-- **Split on sentences, not characters.** Cutting at a fixed character count lands mid-sentence. You get a chunk that starts or ends in the middle of a thought. Sentence boundaries keep each chunk coherent.
-- **64-token overlap between chunks.** Adjacent chunks share 64 tokens at their boundary. Without overlap, a sentence spanning two chunks gets split — a search query matching that sentence won't find a complete answer in either chunk.
 - **Two health endpoints, not one.** `/healthz` means "is the process alive." `/readyz` means "is it ready for traffic." During shutdown, the worker flips readiness to false first — Kubernetes stops sending jobs — then drains what's in flight. One combined endpoint would cause Kubernetes to kill the pod mid-drain.
 
 ---
@@ -252,11 +246,9 @@ services/pipeline-coordinator/src/
 └── index.ts       ← leader election + scheduler + health + graceful shutdown
 ```
 
-**Design choices:**
+**Design choice:**
 
 - **Only the leader runs the scheduler.** Without this, multiple coordinators enqueue the same documents at the same time. Leader election ensures exactly one node schedules at a time.
-- **Followers stay running.** A follower that already has a Redis connection wins the next election immediately when the leader crashes. A follower that shut itself down has to reconnect first. Staying alive costs almost nothing and makes failover faster.
-- **Batches of 50 via `addBulk()`.** One Redis round-trip per batch instead of one per document.
 
 ---
 
@@ -324,12 +316,9 @@ packages/ai-adapter/src/
 └── index.ts
 ```
 
-**Design choices:**
+**Design choice:**
 
-- **OpenAI-compatible HTTP interface.** Anthropic doesn't have native embeddings. Their embedding product (Voyage AI) uses the same request format as OpenAI. Targeting that format means swapping providers is a config change, not a code change.
 - **Circuit opens on 5 consecutive failures, not 5 total.** A flaky provider that mostly works shouldn't trip the circuit. You need 5 failures in a row — the count resets on any success.
-- **One probe at a time in HALF_OPEN.** When the cooldown ends, multiple requests can arrive at once. Without a lock, all of them probe simultaneously — a burst hitting a provider that's still recovering. One probe tells you what you need to know.
-- **Stub returns zeros, not random vectors.** Random vectors make tests non-reproducible. Zeros are deterministic. Stub uses 1536 dimensions to match the real provider so pgvector's schema works with both.
 
 ---
 
@@ -345,10 +334,9 @@ services/ai-inference/src/
 └── index.ts     ← Fastify setup, adapter init, graceful shutdown
 ```
 
-**Design choices:**
+**Design choice:**
 
 - **Separate service, not a package import.** Workers could import `@docflow/ai-adapter` directly. The problem: 10 worker replicas means 10 independent circuit breakers — one trips while the other 9 keep hammering a struggling provider. One service means one shared circuit state, one connection pool, one place API keys live.
-- **`/readyz` reflects circuit state.** Returns 503 when the primary circuit is OPEN. Workers check this before pulling jobs they can't process.
 
 ---
 
@@ -396,12 +384,9 @@ services/ingest-service/src/
 └── index.ts         ← POST /ingest, GET /healthz
 ```
 
-**Design choices:**
+**Design choice:**
 
-- **Storage ambassador, not direct `readFile`.** Worker and ingest service both call `ambassador.get/put` — neither knows if files are on disk or S3. Swapping providers is a config change.
-- **`$executeRaw` for vector inserts.** Prisma marks `vector(1536)` as `Unsupported`. Raw SQL passes the vector as `'[...]'::vector` — PostgreSQL handles the cast.
 - **202 on registration, not completion.** Ingest returns `{ documentId }` as soon as the job is queued, not after embeddings are written. Blocking until pgvector would make uploads as slow as the full pipeline.
-- **Migration as an init container.** `migrate` runs `prisma migrate deploy` and exits before the worker starts.
 
 ---
 
@@ -450,13 +435,9 @@ services/query-service/src/
 └── index.ts             ← shard clients from SHARD_URLS, graceful shutdown
 ```
 
-**Design choices:**
+**Design choice:**
 
 - **`Promise.allSettled` instead of `Promise.all` for scatter.** `Promise.all` fails the entire request the moment one shard errors. `Promise.allSettled` waits for every shard and keeps whatever succeeded. If shard 1 is down, you still get results from shards 0 and 2. A degraded response is better than an error.
-- **Each shard returns its local top-K before merging.** The naive approach is to ask each shard for 1 result and pick the best. That breaks when the true best result is ranked 3rd on its shard — it never makes it into the merge pool. The fix: each shard returns top-K candidates, then you merge all of them and re-sort globally. More data transferred, but the ranking is correct.
-- **Embedding happens in ai-inference, not here.** The query service sends the query text to ai-inference and gets a vector back — same endpoint the workers use. The alternative is giving the query service its own AI client and circuit breaker. That means two independent circuits for the same provider: workers could be on a tripped circuit while the query service keeps hammering it, or vice versa. Sharing one service means one circuit, one connection pool, one place the API key lives.
-- **`SHARD_URLS` is a comma-separated list of connection strings.** In development, you set one URL and get one shard. In production, you set three and get three — no code changes, just config. Adding a shard without downtime is just a redeploy of the query service with an updated env var.
-- **`::float8` cast on the distance score.** pgvector stores cosine distance as a 32-bit float (`float4`). When Prisma reads it back through the raw query, the type mapping is inconsistent — sometimes it comes back as a string, sometimes a number, depending on the driver version. Casting to `float8` in the SQL forces PostgreSQL to return a 64-bit float, which always maps to a JS `number` cleanly.
 
 ---
 
@@ -502,13 +483,9 @@ services/api-gateway/src/
 └── index.ts         ← Fastify setup, raw body capture, graceful shutdown
 ```
 
-**Design choices:**
+**Design choice:**
 
-- **Auth runs before rate limiting.** An invalid API key is rejected immediately — the rate limiter never sees the request. This matters because rate limiting is keyed by tenant, and an unauthenticated request has no tenant. Running them in order keeps both pieces simpler.
 - **Rate limiting is per tenant, not per IP.** IP-based limiting breaks behind a load balancer — every request looks like it comes from the same IP. Tenant ID is in the request body, so each tenant gets their own independent bucket regardless of where the request originates.
-- **In-memory token bucket, not Redis.** Redis-backed rate limiting is consistent across multiple gateway replicas. In-memory is not — if you run three gateway replicas, each has its own counter and a tenant gets 3× the limit. For a single replica this is correct and simpler. Phase 7 (infra) is the right time to swap to Redis if needed.
-- **Proxy forwards the raw body verbatim.** Parsing and re-serializing the request body would change it — multipart boundaries would break, JSON formatting might shift. Capturing the raw bytes and forwarding them unchanged means ingest-service and query-service see exactly what the client sent.
-- **`/readyz` pings both upstreams.** The gateway is only ready if ingest-service and query-service are both reachable. A gateway that's up but routing to a dead service is worse than a gateway that's marked not ready — Kubernetes will stop sending traffic and let another replica handle it.
 
 ---
 
