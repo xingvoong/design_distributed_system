@@ -1,0 +1,67 @@
+{
+  "title": "DocFlow",
+  "uid": "docflow",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Gateway — Requests per second",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(docflow_gateway_requests_total[1m])) by (route)",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Gateway — Request latency p99 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(docflow_gateway_request_duration_seconds_bucket[1m])) by (le, route))",
+          "legendFormat": "p99 {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Gateway — Error rate (4xx + 5xx)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(docflow_gateway_requests_total{status=~\"4..|5..\"}[1m])) by (route, status)",
+          "legendFormat": "{{route}} {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Services — Up",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "up",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": { "calcs": ["lastNotNull"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        }
+      }
+    }
+  ]
+}

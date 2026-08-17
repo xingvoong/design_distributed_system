@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pipeline-coordinator
+  namespace: docflow
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: pipeline-coordinator
+  template:
+    metadata:
+      labels:
+        app: pipeline-coordinator
+    spec:
+      containers:
+        - name: pipeline-coordinator
+          image: docflow/pipeline-coordinator:latest
+          ports:
+            - containerPort: 3002
+          envFrom:
+            - configMapRef:
+                name: docflow-config
+          env:
+            - name: HEALTH_PORT
+              value: "3002"
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3002
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pipeline-coordinator
+  namespace: docflow
+spec:
+  selector:
+    app: pipeline-coordinator
+  ports:
+    - port: 3002
+      targetPort: 3002

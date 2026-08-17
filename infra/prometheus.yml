@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: api-gateway
+    static_configs:
+      - targets: ['api-gateway:3000']
+    metrics_path: /metrics
+
+  - job_name: worker
+    static_configs:
+      - targets: ['worker:3001']
+    metrics_path: /metrics
+
+  - job_name: pipeline-coordinator
+    static_configs:
+      - targets: ['pipeline-coordinator:3002']
+    metrics_path: /metrics
+
+  - job_name: ai-inference
+    static_configs:
+      - targets: ['ai-inference:3003']
+    metrics_path: /metrics
+
+  - job_name: ingest-service
+    static_configs:
+      - targets: ['ingest-service:3004']
+    metrics_path: /metrics
+
+  - job_name: query-service
+    static_configs:
+      - targets: ['query-service:3005']
+    metrics_path: /metrics

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { createAuthHandler } from './auth.js'
 import { createRateLimiter } from './rate-limiter.js'
+import { httpRequestDurationSeconds, httpRequestsTotal, registry } from './metrics.js'
 
 export interface GatewayConfig {
   ingestUrl: string
@@ -17,7 +18,9 @@ async function proxy(
   req: FastifyRequest,
   reply: FastifyReply,
   targetUrl: string,
+  route: string,
 ): Promise<void> {
+  const end = httpRequestDurationSeconds.startTimer({ route })
   const headers: Record<string, string> = { 'content-type': req.headers['content-type'] ?? '' }
   if (req.headers['x-api-key']) headers['x-api-key'] = req.headers['x-api-key'] as string
 
@@ -28,6 +31,8 @@ async function proxy(
   })
 
   const body = await upstream.arrayBuffer()
+  end()
+  httpRequestsTotal.inc({ route, status: String(upstream.status) })
 
   void reply
     .code(upstream.status)
@@ -44,7 +49,7 @@ export function registerRoutes(app: FastifyInstance, config: GatewayConfig) {
    * Rate limited per tenantId (read from the X-Tenant-Id header for multipart).
    */
   app.post('/ingest', { preHandler }, async (req, reply) => {
-    await proxy(req, reply, `${config.ingestUrl}/ingest`)
+    await proxy(req, reply, `${config.ingestUrl}/ingest`, '/ingest')
   })
 
   /**
@@ -52,10 +57,16 @@ export function registerRoutes(app: FastifyInstance, config: GatewayConfig) {
    * Proxies to query-service. Expects JSON body with { query, tenantId, topK? }.
    */
   app.post('/query', { preHandler }, async (req, reply) => {
-    await proxy(req, reply, `${config.queryUrl}/query`)
+    await proxy(req, reply, `${config.queryUrl}/query`, '/query')
   })
 
   app.get('/healthz', async () => ({ status: 'ok' }))
+
+  /** Prometheus metrics scrape endpoint. */
+  app.get('/metrics', async (_req, reply) => {
+    const metrics = await registry.metrics()
+    void reply.header('content-type', registry.contentType).send(metrics)
+  })
 
   app.get('/readyz', async (_req, reply) => {
     // Check both upstreams are reachable

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-service
+  namespace: docflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ingest-service
+  template:
+    metadata:
+      labels:
+        app: ingest-service
+    spec:
+      containers:
+        - name: ingest-service
+          image: docflow/ingest-service:latest
+          ports:
+            - containerPort: 3004
+          envFrom:
+            - configMapRef:
+                name: docflow-config
+          env:
+            - name: PORT
+              value: "3004"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3004
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: uploads
+              mountPath: /uploads
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest-service
+  namespace: docflow
+spec:
+  selector:
+    app: ingest-service
+  ports:
+    - port: 3004
+      targetPort: 3004

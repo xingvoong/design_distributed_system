@@ -147,6 +147,29 @@ services:
       query-service:
         condition: service_started
 
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3006:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "docflow"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
   seeder:
     <<: *build
     # Run from packages/queue where bullmq is a direct dependency
